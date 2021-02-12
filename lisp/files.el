@@ -906,6 +906,8 @@ See `file-symlink-p' to distinguish symlinks."
 		       (read-file-name "Load file: " nil nil 'lambda))))
   (load (expand-file-name file) nil nil t))
 
+(defvar comp-eln-to-el-h)
+
 (defun locate-file (filename path &optional suffixes predicate)
   "Search for FILENAME through PATH.
 If found, return the absolute file name of FILENAME; otherwise
@@ -932,7 +934,10 @@ one or more of those symbols."
 	  (logior (if (memq 'executable predicate) 1 0)
 		  (if (memq 'writable predicate) 2 0)
 		  (if (memq 'readable predicate) 4 0))))
-  (locate-file-internal filename path suffixes predicate))
+  (let ((file (locate-file-internal filename path suffixes predicate)))
+    (if (and file (string-match "\\.eln\\'" file))
+        (gethash (file-name-nondirectory file) comp-eln-to-el-h)
+      file)))
 
 (defun locate-file-completion-table (dirs suffixes string pred action)
   "Do completion for file names passed to `locate-file'."
@@ -2530,13 +2535,11 @@ unless NOMODES is non-nil."
 	   (msg
 	    (cond
 	     ((not warn) nil)
-	     ((and error (file-attributes buffer-file-name))
+	     ((and error (file-exists-p buffer-file-name))
 	      (setq buffer-read-only t)
-	      (if (and (file-symlink-p buffer-file-name)
-		       (not (file-exists-p
-			     (file-chase-links buffer-file-name))))
-		  "Symbolic link that points to nonexistent file"
-		"File exists, but cannot be read"))
+	      "File exists, but cannot be read")
+	     ((and error (file-symlink-p buffer-file-name))
+	      "Symbolic link that points to nonexistent file")
 	     ((not buffer-read-only)
 	      (if (and warn
 		       ;; No need to warn if buffer is auto-saved
@@ -2553,13 +2556,12 @@ unless NOMODES is non-nil."
 	     ((not error)
 	      (setq not-serious t)
 	      "Note: file is write protected")
-	     ((file-attributes (directory-file-name default-directory))
+	     ((file-accessible-directory-p default-directory)
 	      "File not found and directory write-protected")
-	     ((file-exists-p (file-name-directory buffer-file-name))
-	      (setq buffer-read-only nil))
 	     (t
 	      (setq buffer-read-only nil)
-	      "Use M-x make-directory RET RET to create the directory and its parents"))))
+	      (unless (file-directory-p default-directory)
+		"Use M-x make-directory RET RET to create the directory and its parents")))))
       (when msg
 	(message "%s" msg)
 	(or not-serious (sit-for 1 t))))

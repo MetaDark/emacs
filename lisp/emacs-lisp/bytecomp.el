@@ -195,7 +195,6 @@ otherwise adds \".elc\"."
 (autoload 'byte-optimize-form "byte-opt")
 ;; This is the entry point to the lapcode optimizer pass2.
 (autoload 'byte-optimize-lapcode "byte-opt")
-(autoload 'byte-compile-unfold-lambda "byte-opt")
 
 ;; This is the entry point to the decompiler, which is used by the
 ;; disassembler.  The disassembler just requires 'byte-compile, but
@@ -573,6 +572,50 @@ outputting warnings about functions not being defined at runtime.")
 Each element is (INDEX . VALUE)")
 (defvar byte-compile-depth 0 "Current depth of execution stack.")
 (defvar byte-compile-maxdepth 0 "Maximum depth of execution stack.")
+
+;; The following is used by comp.el to spill data out of here.
+;;
+;; Spilling is done in 3 places:
+;;
+;; - `byte-compile-lapcode' to obtain the map bytecode -> LAP for any
+;;   code assembled.
+;;
+;; - `byte-compile-lambda' to obtain arglist doc and interactive spec
+;;   af any lambda compiled (including anonymous).
+;;
+;; - `byte-compile-file-form-defmumble' to obtain the list of
+;;   top-level forms as they would be outputted in the .elc file.
+;;
+
+(cl-defstruct byte-to-native-lambda
+  byte-func lap)
+
+;; Top level forms:
+(cl-defstruct byte-to-native-func-def
+  "Named function defined at top-level."
+  name c-name byte-func)
+(cl-defstruct byte-to-native-top-level
+  "All other top-level forms."
+  form lexical)
+
+(defvar byte-native-compiling nil
+  "Non nil while native compiling.")
+(defvar byte-native-qualities nil
+  "To spill default qualities from the compiled file.")
+(defvar byte-native-for-bootstrap nil
+  "Non nil while compiling for bootstrap."
+  ;; During bootstrap we produce both the .eln and the .elc together.
+  ;; Because the make target is the later this has to be produced as
+  ;; last to be resilient against build interruptions.
+)
+(defvar byte-to-native-lambdas-h nil
+  "Hash byte-code -> byte-to-native-lambda.")
+(defvar byte-to-native-top-level-forms nil
+  "List of top level forms.")
+(defvar byte-to-native-output-file nil
+  "Temporary file containing the byte-compilation output.")
+(defvar byte-to-native-plist-environment nil
+  "To spill `overriding-plist-environment'.")
 
 
 ;;; The byte codes; this information is duplicated in bytecomp.c
@@ -970,7 +1013,12 @@ CONST2 may be evaluated multiple times."
                    ;; it within 2 bytes in the byte string).
                    (puthash value pc hash-table))
                hash-table))
-    (apply 'unibyte-string (nreverse bytes))))
+    (let ((bytecode (apply 'unibyte-string (nreverse bytes))))
+      (when byte-native-compiling
+        ;; Spill LAP for the native compiler here.
+        (puthash bytecode (make-byte-to-native-lambda :lap lap)
+                 byte-to-native-lambdas-h))
+      bytecode)))
 
 
 ;;; compile-time evaluation
@@ -1729,7 +1777,11 @@ It is too wide if it has any lines longer than the largest of
          ;; 		 byte-compile-generate-emacs19-bytecodes)
          (byte-compile-warnings byte-compile-warnings)
          )
-     ,@body))
+     (prog1
+         (progn ,@body)
+       (when byte-native-compiling
+         (setq byte-to-native-plist-environment
+               overriding-plist-environment)))))
 
 (defmacro displaying-byte-compile-warnings (&rest body)
   (declare (debug t))
@@ -2045,15 +2097,16 @@ See also `emacs-lisp-byte-compile-and-load'."
 	  (insert "\n")			; aaah, unix.
 	  (cond
 	   ((null target-file) nil)     ;We only wanted the warnings!
-	   ((and (file-writable-p target-file)
-                 ;; We attempt to create a temporary file in the
-                 ;; target directory, so the target directory must be
-                 ;; writable.
-                 (file-writable-p
-                  (file-name-directory
-                   ;; Need to expand in case TARGET-FILE doesn't
-                   ;; include a directory (Bug#45287).
-                   (expand-file-name target-file))))
+	   ((or byte-native-compiling
+		(and (file-writable-p target-file)
+		     ;; We attempt to create a temporary file in the
+		     ;; target directory, so the target directory must be
+		     ;; writable.
+		     (file-writable-p
+		      (file-name-directory
+		       ;; Need to expand in case TARGET-FILE doesn't
+		       ;; include a directory (Bug#45287).
+		       (expand-file-name target-file)))))
 	    ;; We must disable any code conversion here.
 	    (let* ((coding-system-for-write 'no-conversion)
 		   ;; Write to a tempfile so that if another Emacs
@@ -2061,7 +2114,8 @@ See also `emacs-lisp-byte-compile-and-load'."
 		   ;; parallel bootstrap), it does not risk getting a
 		   ;; half-finished file.  (Bug#4196)
 		   (tempfile
-		    (make-temp-file (expand-file-name target-file)))
+		    (make-temp-file (when (file-writable-p target-file)
+                                      (expand-file-name target-file))))
 		   (default-modes (default-file-modes))
 		   (temp-modes (logand default-modes #o600))
 		   (desired-modes (logand default-modes #o666))
@@ -2080,8 +2134,16 @@ See also `emacs-lisp-byte-compile-and-load'."
 	      ;; emacs-lisp files in the build tree are
 	      ;; recompiled).  Previously this was accomplished by
 	      ;; deleting target-file before writing it.
-	      (rename-file tempfile target-file t))
-	    (or noninteractive (message "Wrote %s" target-file)))
+	      (if byte-native-compiling
+                  (if byte-native-for-bootstrap
+                      ;; Defer elc final renaming.
+                      (setf byte-to-native-output-file
+                            (cons tempfile target-file))
+                    (delete-file tempfile))
+                (rename-file tempfile target-file t)))
+	    (or noninteractive
+		byte-native-compiling
+		(message "Wrote %s" target-file)))
            ((file-writable-p target-file)
             ;; In case the target directory isn't writable (see e.g. Bug#44631),
             ;; try writing to the output file directly.  We must disable any
@@ -2201,6 +2263,11 @@ With argument ARG, insert value in current buffer after the form."
 	(setq byte-compile-unresolved-functions nil)
         (setq byte-compile-noruntime-functions nil)
         (setq byte-compile-new-defuns nil)
+        (when byte-native-compiling
+          (defvar comp-speed)
+          (push `(comp-speed . ,comp-speed) byte-native-qualities)
+          (defvar comp-debug)
+          (push `(comp-debug . ,comp-debug) byte-native-qualities))
 
 	;; Compile the forms from the input buffer.
 	(while (progn
@@ -2273,6 +2340,10 @@ Call from the source buffer."
   ;; defalias calls are output directly by byte-compile-file-form-defmumble;
   ;; it does not pay to first build the defalias in defmumble and then parse
   ;; it here.
+  (when byte-native-compiling
+    ;; Spill output for the native compiler here
+    (push (make-byte-to-native-top-level :form form :lexical lexical-binding)
+          byte-to-native-top-level-forms))
   (let ((print-escape-newlines t)
         (print-length nil)
         (print-level nil)
@@ -2717,6 +2788,15 @@ not to take responsibility for the actual compilation of the code."
                  ;; If there's no doc string, provide -1 as the "doc string
                  ;; index" so that no element will be treated as a doc string.
                  (if (not (stringp (documentation code t))) -1 4)))
+            (when byte-native-compiling
+              ;; Spill output for the native compiler here.
+              (push (if macro
+                        (make-byte-to-native-top-level
+                         :form `(defalias ',name '(macro . ,code) nil)
+                         :lexical lexical-binding)
+                      (make-byte-to-native-func-def :name name
+                                                    :byte-func code))
+                    byte-to-native-top-level-forms))
             ;; Output the form by hand, that's much simpler than having
             ;; b-c-output-file-form analyze the defalias.
             (byte-compile-output-docform
@@ -2989,23 +3069,30 @@ for symbols generated by the byte compiler itself."
                                    reserved-csts)))
       ;; Build the actual byte-coded function.
       (cl-assert (eq 'byte-code (car-safe compiled)))
-      (apply #'make-byte-code
-             (if lexical-binding
-                 (byte-compile-make-args-desc arglist)
-               arglist)
-             (append
-              ;; byte-string, constants-vector, stack depth
-              (cdr compiled)
-              ;; optionally, the doc string.
-              (cond ((and lexical-binding arglist)
-                     ;; byte-compile-make-args-desc lost the args's names,
-                     ;; so preserve them in the docstring.
-                     (list (help-add-fundoc-usage doc arglist)))
-                    ((or doc int)
-                     (list doc)))
-              ;; optionally, the interactive spec.
-              (if int
-                  (list (nth 1 int))))))))
+      (let ((out
+             (apply #'make-byte-code
+                    (if lexical-binding
+                        (byte-compile-make-args-desc arglist)
+                      arglist)
+                    (append
+                     ;; byte-string, constants-vector, stack depth
+                     (cdr compiled)
+                     ;; optionally, the doc string.
+                     (cond ((and lexical-binding arglist)
+                            ;; byte-compile-make-args-desc lost the args's names,
+                            ;; so preserve them in the docstring.
+                            (list (help-add-fundoc-usage doc arglist)))
+                           ((or doc int)
+                            (list doc)))
+                     ;; optionally, the interactive spec.
+                     (if int
+                         (list (nth 1 int)))))))
+        (when byte-native-compiling
+          (setf (byte-to-native-lambda-byte-func
+                 (gethash (cadr compiled)
+                          byte-to-native-lambdas-h))
+                out))
+        out))))
 
 (defvar byte-compile-reserved-constants 0)
 
@@ -3277,7 +3364,7 @@ for symbols generated by the byte compiler itself."
      ((and (eq (car-safe (car form)) 'lambda)
            ;; if the form comes out the same way it went in, that's
            ;; because it was malformed, and we couldn't unfold it.
-           (not (eq form (setq form (byte-compile-unfold-lambda form)))))
+           (not (eq form (setq form (macroexp--unfold-lambda form)))))
       (byte-compile-form form byte-compile--for-effect)
       (setq byte-compile--for-effect nil))
      ((byte-compile-normal-call form)))
@@ -5203,7 +5290,7 @@ Use with caution."
                    ;; so it can cause recompilation to fail.
                    (not (member (file-name-nondirectory f)
                                 '("pcase.el" "bytecomp.el" "macroexp.el"
-                                  "cconv.el" "byte-opt.el"))))
+                                  "cconv.el" "byte-opt.el" "comp.el"))))
           (message "Reloading stale %s" (file-name-nondirectory f))
           (condition-case nil
               (load f 'noerror nil 'nosuffix)
@@ -5288,9 +5375,10 @@ and corresponding effects."
       (let ((byte-optimize nil)		; do it fast
 	    (byte-compile-warnings nil))
 	(mapc (lambda (x)
-		(or noninteractive (message "compiling %s..." x))
-		(byte-compile x)
-		(or noninteractive (message "compiling %s...done" x)))
+                (unless (subr-native-elisp-p x)
+		  (or noninteractive (message "compiling %s..." x))
+		  (byte-compile x)
+		  (or noninteractive (message "compiling %s...done" x))))
 	      '(byte-compile-normal-call
 		byte-compile-form
 		byte-compile-body

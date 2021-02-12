@@ -536,6 +536,14 @@ It is the default value of the variable `top-level'."
     (setq user-emacs-directory
 	  (startup--xdg-or-homedot startup--xdg-config-home-emacs nil))
 
+    (when (featurep 'nativecomp)
+      (defvar comp-eln-load-path)
+      (let ((path-env (getenv "EMACSNATIVELOADPATH")))
+        (when path-env
+          (dolist (path (split-string path-env ":"))
+            (unless (string= "" path)
+              (push path comp-eln-load-path)))))
+      (push (concat user-emacs-directory "eln-cache/") comp-eln-load-path))
     ;; Look in each dir in load-path for a subdirs.el file.  If we
     ;; find one, load it, which will add the appropriate subdirs of
     ;; that dir into load-path.  This needs to be done before setting

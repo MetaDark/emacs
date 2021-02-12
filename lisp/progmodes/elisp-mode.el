@@ -187,18 +187,34 @@ All commands in `lisp-mode-shared-map' are inherited by this map.")
       (byte-compile-file buffer-file-name)
     (error "The buffer must be saved in a file first")))
 
-(defun emacs-lisp-byte-compile-and-load ()
-  "Byte-compile the current file (if it has changed), then load compiled code."
-  (interactive)
+(defun emacs-lisp--before-compile-buffer ()
+  "Make sure the buffer is saved before compiling."
   (or buffer-file-name
       (error "The buffer must be saved in a file first"))
-  (require 'bytecomp)
   ;; Recompile if file or buffer has changed since last compilation.
   (if (and (buffer-modified-p)
 	   (y-or-n-p (format "Save buffer %s first? " (buffer-name))))
-      (save-buffer))
+      (save-buffer)))
+
+(defun emacs-lisp-byte-compile-and-load ()
+  "Byte-compile the current file (if it has changed), then load compiled code."
+  (interactive)
+  (emacs-lisp--before-compile-buffer)
+  (require 'bytecomp)
   (byte-recompile-file buffer-file-name nil 0)
   (load buffer-file-name))
+
+(declare-function native-compile "comp")
+(defun emacs-lisp-native-compile-and-load ()
+  "Native-compile synchronously the current file (if it has changed).
+Load the compiled code when finished.
+
+Use `emacs-lisp-byte-compile-and-load' in combination with
+`comp-deferred-compilation' set to `t' to achieve asynchronous
+native compilation."
+  (interactive)
+  (emacs-lisp--before-compile-buffer)
+  (load (native-compile buffer-file-name)))
 
 (defun emacs-lisp-macroexpand ()
   "Macroexpand the form after point.
@@ -1268,7 +1284,8 @@ If `eval-expression-debug-on-error' is non-nil, which is the default,
 this command arranges for all errors to enter the debugger."
   (interactive "P")
   (if (null eval-expression-debug-on-error)
-      (elisp--eval-last-sexp eval-last-sexp-arg-internal)
+      (values--store-value
+       (elisp--eval-last-sexp eval-last-sexp-arg-internal))
     (let ((value
 	   (let ((debug-on-error elisp--eval-last-sexp-fake-value))
 	     (cons (elisp--eval-last-sexp eval-last-sexp-arg-internal)
@@ -1337,7 +1354,8 @@ Return the result of evaluation."
   ;; printing, not while evaluating.
   (let ((debug-on-error eval-expression-debug-on-error)
 	(print-length eval-expression-print-length)
-	(print-level eval-expression-print-level))
+	(print-level eval-expression-print-level)
+        elisp--eval-defun-result)
     (save-excursion
       ;; Arrange for eval-region to "read" the (possibly) altered form.
       ;; eval-region handles recording which file defines a function or
@@ -1353,17 +1371,18 @@ Return the result of evaluation."
           (setq end (point)))
         ;; Alter the form if necessary.
         (let ((form (eval-sexp-add-defvars
-                     (elisp--eval-defun-1 (macroexpand form)))))
+                     (elisp--eval-defun-1
+                      (macroexpand
+                       `(setq elisp--eval-defun-result ,form))))))
           (eval-region beg end standard-output
                        (lambda (_ignore)
                          ;; Skipping to the end of the specified region
                          ;; will make eval-region return.
                          (goto-char end)
-                         form))))))
-  (let ((str (eval-expression-print-format (car values))))
-    (if str (princ str)))
-  ;; The result of evaluation has been put onto VALUES.  So return it.
-  (car values))
+                         form)))))
+    (let ((str (eval-expression-print-format elisp--eval-defun-result)))
+      (if str (princ str)))
+    elisp--eval-defun-result))
 
 (defun eval-defun (edebug-it)
   "Evaluate the top-level form containing point, or after point.

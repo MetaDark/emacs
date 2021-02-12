@@ -3212,9 +3212,9 @@ that that variable is buffer-local to the summary buffers."
 		     (format "%s" (car method))
 		   (format "%s:%s" (car method) (cadr method))))
 	   (name-method (cons name method)))
-      (when (and (not (member name-method gnus-server-method-cache))
-		 (not no-enter-cache)
-		 (not (assoc (car name-method) gnus-server-method-cache)))
+      (unless (or no-enter-cache
+		  (member name-method gnus-server-method-cache)
+		  (assoc (car name-method) gnus-server-method-cache))
 	(push name-method gnus-server-method-cache))
       name)))
 
@@ -3273,8 +3273,7 @@ that that variable is buffer-local to the summary buffers."
 	 (gnus-server-to-method method))
 	((equal method gnus-select-method)
 	 gnus-select-method)
-	((and (stringp (car method))
-	      group)
+	((and group (stringp (car method)))
 	 (gnus-server-extend-method group method))
 	((and method
 	      (not group)
@@ -4149,8 +4148,9 @@ prompt the user for the name of an NNTP server to use."
   ;; file.
   (unless (string-match "^Gnus" gnus-version)
     (load "gnus-load" nil t))
-  (unless (byte-code-function-p (symbol-function 'gnus))
-    (message "You should byte-compile Gnus")
+  (unless (or (byte-code-function-p (symbol-function 'gnus))
+	      (subr-native-elisp-p (symbol-function 'gnus)))
+    (message "You should compile Gnus")
     (sit-for 2))
   (let ((gnus-action-message-log (list nil)))
     (gnus-1 arg dont-connect child)
