@@ -488,6 +488,11 @@ enum cast_kind_of_type
     kind_pointer
   };
 
+typedef struct {
+  EMACS_INT len;
+  gcc_jit_rvalue *r_val;
+} reloc_array_t;
+
 /* C side of the compiler context.  */
 
 typedef struct {
@@ -560,6 +565,7 @@ typedef struct {
   EMACS_INT func_speed; /* From comp-func speed slot.  */
   gcc_jit_block *block;  /* Current basic block being compiled.  */
   gcc_jit_lvalue *scratch; /* Used as scratch slot for some code sequence (switch).  */
+  ptrdiff_t frame_size; /* Size of the following array in elements. */
   gcc_jit_lvalue **frame; /* Frame slot n -> gcc_jit_lvalue *.  */
   gcc_jit_rvalue *zero;
   gcc_jit_rvalue *one;
@@ -582,11 +588,11 @@ typedef struct {
   Lisp_Object imported_funcs_h; /* subr_name -> gcc_jit_field *reloc_field.  */
   Lisp_Object emitter_dispatcher;
   /* Synthesized struct holding data relocs.  */
-  gcc_jit_rvalue *data_relocs;
+  reloc_array_t data_relocs;
   /* Same as before but can't go in pure space. */
-  gcc_jit_rvalue *data_relocs_impure;
+  reloc_array_t data_relocs_impure;
   /* Same as before but content does not survive load phase. */
-  gcc_jit_rvalue *data_relocs_ephemeral;
+  reloc_array_t data_relocs_ephemeral;
   /* Global structure holding function relocations.  */
   gcc_jit_lvalue *func_relocs;
   gcc_jit_type *func_relocs_ptr_type;
@@ -609,7 +615,7 @@ typedef struct {
 } static_obj_t;
 
 typedef struct {
-  gcc_jit_rvalue *array;
+  reloc_array_t array;
   gcc_jit_rvalue *idx;
 } imm_reloc_t;
 
@@ -785,7 +791,9 @@ emit_mvar_lval (Lisp_Object mvar)
       return comp.scratch;
     }
 
-  return comp.frame[XFIXNUM (mvar_slot)];
+  EMACS_INT slot_n = XFIXNUM (mvar_slot);
+  eassert (slot_n < comp.frame_size);
+  return comp.frame[slot_n];
 }
 
 static void
@@ -824,7 +832,9 @@ obj_to_reloc (Lisp_Object obj)
   xsignal1 (Qnative_ice,
 	    build_string ("cant't find data in relocation containers"));
   assume (false);
+
  found:
+  eassert (XFIXNUM (idx) < reloc.array.len);
   if (!FIXNUMP (idx))
     xsignal1 (Qnative_ice,
 	      build_string ("inconsistent data relocation container"));
@@ -1163,7 +1173,7 @@ emit_rvalue_from_unsigned_long_long (gcc_jit_type *type, unsigned long long n)
 static gcc_jit_rvalue *
 emit_rvalue_from_emacs_uint (EMACS_UINT val)
 {
-  if (val != (long) val)
+  if (val > LONG_MAX || val < LONG_MIN)
     return emit_rvalue_from_unsigned_long_long (comp.emacs_uint_type, val);
   else
     return gcc_jit_context_new_rvalue_from_long (comp.ctxt,
@@ -1174,7 +1184,7 @@ emit_rvalue_from_emacs_uint (EMACS_UINT val)
 static gcc_jit_rvalue *
 emit_rvalue_from_emacs_int (EMACS_INT val)
 {
-  if (val != (long) val)
+  if (val > LONG_MAX || val < LONG_MIN)
     return emit_rvalue_from_long_long (comp.emacs_int_type, val);
   else
     return gcc_jit_context_new_rvalue_from_long (comp.ctxt,
@@ -1184,7 +1194,7 @@ emit_rvalue_from_emacs_int (EMACS_INT val)
 static gcc_jit_rvalue *
 emit_rvalue_from_lisp_word_tag (Lisp_Word_tag val)
 {
-  if (val != (long) val)
+  if (val > LONG_MAX || val < LONG_MIN)
     return emit_rvalue_from_unsigned_long_long (comp.lisp_word_tag_type, val);
   else
     return gcc_jit_context_new_rvalue_from_long (comp.ctxt,
@@ -1200,7 +1210,7 @@ emit_rvalue_from_lisp_word (Lisp_Word val)
                                               comp.lisp_word_type,
                                               val);
 #else
-  if (val != (long) val)
+  if (val > LONG_MAX || val < LONG_MIN)
     return emit_rvalue_from_unsigned_long_long (comp.lisp_word_type, val);
   else
     return gcc_jit_context_new_rvalue_from_long (comp.ctxt,
@@ -1555,7 +1565,7 @@ emit_lisp_obj_reloc_lval (Lisp_Object obj)
   imm_reloc_t reloc = obj_to_reloc (obj);
   return gcc_jit_context_new_array_access (comp.ctxt,
 					   NULL,
-					   reloc.array,
+					   reloc.array.r_val,
 					   reloc.idx);
 }
 
@@ -2047,6 +2057,7 @@ emit_limple_insn (Lisp_Object insn)
       */
       gcc_jit_lvalue *nargs =
 	gcc_jit_param_as_lvalue (gcc_jit_function_get_param (comp.func, 0));
+      eassert (XFIXNUM (arg[0]) < INT_MAX);
       gcc_jit_rvalue *n =
 	gcc_jit_context_new_rvalue_from_int (comp.ctxt,
 					     comp.ptrdiff_type,
@@ -2190,6 +2201,7 @@ emit_limple_insn (Lisp_Object insn)
     {
       /* Ex: (set-par-to-local #s(comp-mvar 0 3 nil nil nil nil) 0).  */
       EMACS_INT param_n = XFIXNUM (arg[1]);
+      eassert (param_n < INT_MAX);
       gcc_jit_rvalue *param =
 	gcc_jit_param_as_rvalue (gcc_jit_function_get_param (comp.func,
 							     param_n));
@@ -2218,6 +2230,7 @@ emit_limple_insn (Lisp_Object insn)
       */
 
       EMACS_INT slot_n = XFIXNUM (CALL1I (comp-mvar-slot, arg[0]));
+      eassert (slot_n < INT_MAX);
       gcc_jit_rvalue *n =
 	gcc_jit_context_new_rvalue_from_int (comp.ctxt,
 					     comp.ptrdiff_type,
@@ -2267,7 +2280,7 @@ emit_limple_insn (Lisp_Object insn)
 	gcc_jit_lvalue_as_rvalue (
 	  gcc_jit_context_new_array_access (comp.ctxt,
 					    NULL,
-					    reloc.array,
+					    reloc.array.r_val,
 					    reloc.idx)));
     }
   else if (EQ (op, Qcomment))
@@ -2605,18 +2618,19 @@ emit_static_object (const char *name, Lisp_Object obj)
 }
 #pragma GCC diagnostic pop
 
-static gcc_jit_rvalue *
+static reloc_array_t
 declare_imported_data_relocs (Lisp_Object container, const char *code_symbol,
 			      const char *text_symbol)
 {
   /* Imported objects.  */
-  EMACS_INT d_reloc_len =
+  reloc_array_t res;
+  res.len =
     XFIXNUM (CALL1I (hash-table-count,
 		     CALL1I (comp-data-container-idx, container)));
   Lisp_Object d_reloc = CALL1I (comp-data-container-l, container);
   d_reloc = Fvconcat (1, &d_reloc);
 
-  gcc_jit_rvalue *reloc_struct =
+  res.r_val =
     gcc_jit_lvalue_as_rvalue (
       gcc_jit_context_new_global (
 	comp.ctxt,
@@ -2625,12 +2639,12 @@ declare_imported_data_relocs (Lisp_Object container, const char *code_symbol,
 	gcc_jit_context_new_array_type (comp.ctxt,
 					NULL,
 					comp.lisp_obj_type,
-					d_reloc_len),
+					res.len),
 	code_symbol));
 
   emit_static_object (text_symbol, d_reloc);
 
-  return reloc_struct;
+  return res;
 }
 
 static void
@@ -3794,6 +3808,7 @@ declare_lex_function (Lisp_Object func)
   if (!nargs)
     {
       EMACS_INT max_args = XFIXNUM (CALL1I (comp-args-max, args));
+      eassert (max_args < INT_MAX);
       gcc_jit_type **type = SAFE_ALLOCA (max_args * sizeof (*type));
       for (ptrdiff_t i = 0; i < max_args; i++)
 	type[i] = comp.lisp_obj_type;
@@ -3857,7 +3872,8 @@ static void
 compile_function (Lisp_Object func)
 {
   USE_SAFE_ALLOCA;
-  EMACS_INT frame_size = XFIXNUM (CALL1I (comp-func-frame-size, func));
+  comp.frame_size = XFIXNUM (CALL1I (comp-func-frame-size, func));
+  eassert (comp.frame_size < INT_MAX);
 
   comp.func = xmint_pointer (Fgethash (CALL1I (comp-func-c-name, func),
 				       comp.exported_funcs_h, Qnil));
@@ -3871,7 +3887,7 @@ compile_function (Lisp_Object func)
 				comp.func_relocs_ptr_type,
 				"freloc");
 
-  comp.frame = SAFE_ALLOCA (frame_size * sizeof (*comp.frame));
+  comp.frame = SAFE_ALLOCA (comp.frame_size * sizeof (*comp.frame));
   if (comp.func_has_non_local || !comp.func_speed)
     {
       /* FIXME: See bug#42360.  */
@@ -3882,10 +3898,10 @@ compile_function (Lisp_Object func)
           gcc_jit_context_new_array_type (comp.ctxt,
                                           NULL,
                                           comp.lisp_obj_type,
-                                          frame_size),
+                                          comp.frame_size),
           "frame");
 
-      for (ptrdiff_t i = 0; i < frame_size; ++i)
+      for (ptrdiff_t i = 0; i < comp.frame_size; ++i)
 	comp.frame[i] =
           gcc_jit_context_new_array_access (
             comp.ctxt,
@@ -3896,7 +3912,7 @@ compile_function (Lisp_Object func)
                                                  i));
     }
   else
-    for (ptrdiff_t i = 0; i < frame_size; ++i)
+    for (ptrdiff_t i = 0; i < comp.frame_size; ++i)
       comp.frame[i] =
 	gcc_jit_function_new_local (comp.func,
 				    NULL,
@@ -4328,13 +4344,6 @@ add_driver_options (void)
 			    " and above."));
 }
 
-static void
-restore_sigmask (void)
-{
-  pthread_sigmask (SIG_SETMASK, &saved_sigset, 0);
-  unblock_input ();
-}
-
 DEFUN ("comp--compile-ctxt-to-file", Fcomp__compile_ctxt_to_file,
        Scomp__compile_ctxt_to_file,
        1, 1, 0,
@@ -4349,7 +4358,9 @@ DEFUN ("comp--compile-ctxt-to-file", Fcomp__compile_ctxt_to_file,
   comp.func_relocs_local = NULL;
 
   comp.speed = XFIXNUM (CALL1I (comp-ctxt-speed, Vcomp_ctxt));
+  eassert (comp.speed < INT_MAX);
   comp.debug = XFIXNUM (CALL1I (comp-ctxt-debug, Vcomp_ctxt));
+  eassert (comp.debug < INT_MAX);
 
   if (comp.debug)
       gcc_jit_context_set_bool_option (comp.ctxt,
@@ -4380,23 +4391,6 @@ DEFUN ("comp--compile-ctxt-to-file", Fcomp__compile_ctxt_to_file,
   comp.d_ephemeral_idx =
     CALL1I (comp-data-container-idx, CALL1I (comp-ctxt-d-ephemeral, Vcomp_ctxt));
 
-  ptrdiff_t count = 0;
-
-  if (!noninteractive)
-    {
-      sigset_t blocked;
-      /* Gcc doesn't like being interrupted at all.  */
-      block_input ();
-      sigemptyset (&blocked);
-      sigaddset (&blocked, SIGALRM);
-      sigaddset (&blocked, SIGINT);
-#ifdef USABLE_SIGIO
-      sigaddset (&blocked, SIGIO);
-#endif
-      pthread_sigmask (SIG_BLOCK, &blocked, &saved_sigset);
-      count = SPECPDL_INDEX ();
-      record_unwind_protect_void (restore_sigmask);
-    }
   emit_ctxt_code ();
 
   /* Define inline functions.  */
@@ -4447,9 +4441,6 @@ DEFUN ("comp--compile-ctxt-to-file", Fcomp__compile_ctxt_to_file,
 
   CALL1I (comp-clean-up-stale-eln, filename);
   CALL2I (comp-delete-or-replace-file, filename, tmp_file);
-
-  if (!noninteractive)
-    unbind_to (count, Qnil);
 
   return filename;
 }
@@ -4710,12 +4701,12 @@ check_comp_unit_relocs (struct Lisp_Native_Comp_Unit *comp_u)
   Lisp_Object *data_imp_relocs = dynlib_sym (handle, DATA_RELOC_IMPURE_SYM);
 
   EMACS_INT d_vec_len = XFIXNUM (Flength (comp_u->data_vec));
-  for (EMACS_INT i = 0; i < d_vec_len; i++)
+  for (ptrdiff_t i = 0; i < d_vec_len; i++)
     if (!EQ (data_relocs[i],  AREF (comp_u->data_vec, i)))
       return false;
 
   d_vec_len = XFIXNUM (Flength (comp_u->data_impure_vec));
-  for (EMACS_INT i = 0; i < d_vec_len; i++)
+  for (ptrdiff_t i = 0; i < d_vec_len; i++)
     {
       Lisp_Object x = data_imp_relocs[i];
       if (EQ (x, Qlambda_fixup))
@@ -4858,7 +4849,7 @@ load_comp_unit (struct Lisp_Native_Comp_Unit *comp_u, bool loading_dump,
 	 is not cons hashed.  */
       if (!recursive_load)
 	{
-	  Lisp_Object volatile data_ephemeral_vec  =
+	  data_ephemeral_vec =
 	    load_static_obj (comp_u, TEXT_DATA_RELOC_EPHEMERAL_SYM);
 
 	  EMACS_INT d_vec_len = XFIXNUM (Flength (data_ephemeral_vec));

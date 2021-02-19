@@ -2712,7 +2712,7 @@ dump_hash_table (struct dump_context *ctx,
 static dump_off
 dump_buffer (struct dump_context *ctx, const struct buffer *in_buffer)
 {
-#if CHECK_STRUCTS && !defined HASH_buffer_99D642C1CB
+#if CHECK_STRUCTS && !defined HASH_buffer_F8FE65D42F
 # error "buffer changed. See CHECK_STRUCTS comment in config.h."
 #endif
   struct buffer munged_buffer = *in_buffer;
@@ -2723,6 +2723,7 @@ dump_buffer (struct dump_context *ctx, const struct buffer *in_buffer)
     buffer->window_count = 0;
   else
     eassert (buffer->window_count == -1);
+  buffer->local_minor_modes_ = Qnil;
   buffer->last_selected_window_ = Qnil;
   buffer->display_count_ = make_fixnum (0);
   buffer->clip_changed = 0;
@@ -5279,10 +5280,10 @@ dump_do_dump_relocation (const uintptr_t dump_base,
 	/* Check just once if this is a local build or Emacs was installed.  */
 	if (installation_state == UNKNOWN)
 	  {
-	    char *fname = SSDATA (concat2 (Vinvocation_directory,
-					   XCAR (comp_u->file)));
+	    Lisp_Object fname =
+	      concat2 (Vinvocation_directory, XCAR (comp_u->file));
 	    FILE *file;
-	    if ((file = fopen (fname, "r")))
+	    if ((file = emacs_fopen (SSDATA (ENCODE_FILE (fname)), "r")))
 	      {
 		fclose (file);
 		installation_state = INSTALLED;
