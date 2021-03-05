@@ -36,6 +36,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "dynlib.h"
 #include "buffer.h"
 #include "blockinput.h"
+#include "coding.h"
 #include "md5.h"
 #include "sysstdio.h"
 #include "zlib.h"
@@ -56,6 +57,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #undef gcc_jit_block_end_with_return
 #undef gcc_jit_block_end_with_void_return
 #undef gcc_jit_context_acquire
+#undef gcc_jit_context_add_command_line_option
 #undef gcc_jit_context_add_driver_option
 #undef gcc_jit_context_compile_to_file
 #undef gcc_jit_context_dump_reproducer_to_file
@@ -124,6 +126,8 @@ DEF_DLL_FN (const char *, gcc_jit_context_get_first_error,
 DEF_DLL_FN (gcc_jit_block *, gcc_jit_function_new_block,
             (gcc_jit_function *func, const char *name));
 DEF_DLL_FN (gcc_jit_context *, gcc_jit_context_acquire, (void));
+DEF_DLL_FN (void, gcc_jit_context_add_command_line_option,
+            (gcc_jit_context *ctxt, const char *optname));
 DEF_DLL_FN (void, gcc_jit_context_add_driver_option,
             (gcc_jit_context *ctxt, const char *optname));
 DEF_DLL_FN (gcc_jit_field *, gcc_jit_context_new_field,
@@ -176,8 +180,10 @@ DEF_DLL_FN (gcc_jit_rvalue *, gcc_jit_context_new_comparison,
              enum gcc_jit_comparison op, gcc_jit_rvalue *a, gcc_jit_rvalue *b));
 DEF_DLL_FN (gcc_jit_rvalue *, gcc_jit_context_new_rvalue_from_long,
             (gcc_jit_context *ctxt, gcc_jit_type *numeric_type, long value));
+#if LISP_WORDS_ARE_POINTERS
 DEF_DLL_FN (gcc_jit_rvalue *, gcc_jit_context_new_rvalue_from_ptr,
             (gcc_jit_context *ctxt, gcc_jit_type *pointer_type, void *value));
+#endif
 DEF_DLL_FN (gcc_jit_rvalue *, gcc_jit_context_new_string_literal,
             (gcc_jit_context *ctxt, const char *value));
 DEF_DLL_FN (gcc_jit_rvalue *, gcc_jit_context_new_unary_op,
@@ -287,7 +293,9 @@ init_gccjit_functions (void)
   LOAD_DLL_FN (library, gcc_jit_context_new_param);
   LOAD_DLL_FN (library, gcc_jit_context_new_rvalue_from_int);
   LOAD_DLL_FN (library, gcc_jit_context_new_rvalue_from_long);
+#if LISP_WORDS_ARE_POINTERS
   LOAD_DLL_FN (library, gcc_jit_context_new_rvalue_from_ptr);
+#endif
   LOAD_DLL_FN (library, gcc_jit_context_new_string_literal);
   LOAD_DLL_FN (library, gcc_jit_context_new_struct_type);
   LOAD_DLL_FN (library, gcc_jit_context_new_unary_op);
@@ -312,6 +320,7 @@ init_gccjit_functions (void)
   LOAD_DLL_FN (library, gcc_jit_struct_set_fields);
   LOAD_DLL_FN (library, gcc_jit_type_get_const);
   LOAD_DLL_FN (library, gcc_jit_type_get_pointer);
+  LOAD_DLL_FN_OPT (library, gcc_jit_context_add_command_line_option);
   LOAD_DLL_FN_OPT (library, gcc_jit_context_add_driver_option);
   LOAD_DLL_FN_OPT (library, gcc_jit_global_set_initializer);
   LOAD_DLL_FN_OPT (library, gcc_jit_version_major);
@@ -330,6 +339,7 @@ init_gccjit_functions (void)
 #define gcc_jit_block_end_with_return fn_gcc_jit_block_end_with_return
 #define gcc_jit_block_end_with_void_return fn_gcc_jit_block_end_with_void_return
 #define gcc_jit_context_acquire fn_gcc_jit_context_acquire
+#define gcc_jit_context_add_command_line_option fn_gcc_jit_context_add_command_line_option
 #define gcc_jit_context_add_driver_option fn_gcc_jit_context_add_driver_option
 #define gcc_jit_context_compile_to_file fn_gcc_jit_context_compile_to_file
 #define gcc_jit_context_dump_reproducer_to_file fn_gcc_jit_context_dump_reproducer_to_file
@@ -352,7 +362,9 @@ init_gccjit_functions (void)
 #define gcc_jit_context_new_param fn_gcc_jit_context_new_param
 #define gcc_jit_context_new_rvalue_from_int fn_gcc_jit_context_new_rvalue_from_int
 #define gcc_jit_context_new_rvalue_from_long fn_gcc_jit_context_new_rvalue_from_long
-#define gcc_jit_context_new_rvalue_from_ptr fn_gcc_jit_context_new_rvalue_from_ptr
+#if LISP_WORDS_ARE_POINTERS
+# define gcc_jit_context_new_rvalue_from_ptr fn_gcc_jit_context_new_rvalue_from_ptr
+#endif
 #define gcc_jit_context_new_string_literal fn_gcc_jit_context_new_string_literal
 #define gcc_jit_context_new_struct_type fn_gcc_jit_context_new_struct_type
 #define gcc_jit_context_new_unary_op fn_gcc_jit_context_new_unary_op
@@ -411,7 +423,7 @@ load_gccjit_if_necessary (bool mandatory)
 
 
 /* Increase this number to force a new Vcomp_abi_hash to be generated.  */
-#define ABI_VERSION "1"
+#define ABI_VERSION "2"
 
 /* Length of the hashes used for eln file naming.  */
 #define HASH_LENGTH 8
@@ -635,7 +647,9 @@ void *helper_link_table[] =
     helper_PSEUDOVECTOR_TYPEP_XUNTAG,
     pure_write_error,
     push_handler,
+#ifdef WINDOWSNT
     SETJMP_NAME,
+#endif
     record_unwind_protect_excursion,
     helper_unbind_n,
     helper_save_restriction,
@@ -680,7 +694,8 @@ comp_hash_source_file (Lisp_Object filename)
   /* Can't use Finsert_file_contents + Fbuffer_hash as this is called
      by Fcomp_el_to_eln_filename too early during bootstrap.  */
   bool is_gz = suffix_p (filename, ".gz");
-  FILE *f = emacs_fopen (SSDATA (filename), is_gz ? "rb" : "r");
+  Lisp_Object encoded_filename = ENCODE_FILE (filename);
+  FILE *f = emacs_fopen (SSDATA (encoded_filename), is_gz ? "rb" : "r");
 
   if (!f)
     report_file_error ("Opening source file", filename);
@@ -700,6 +715,16 @@ comp_hash_source_file (Lisp_Object filename)
   return Fsubstring (digest, Qnil, make_fixnum (HASH_LENGTH));
 }
 
+DEFUN ("comp--subr-signature", Fcomp__subr_signature,
+       Scomp__subr_signature, 1, 1, 0,
+       doc: /* Support function to 'hash_native_abi'.
+For internal use.  */)
+  (Lisp_Object subr)
+{
+  return concat2 (Fsubr_name (subr),
+		  Fprin1_to_string (Fsubr_arity (subr), Qnil));
+}
+
 /* Produce a key hashing Vcomp_subr_list.  */
 
 void
@@ -711,8 +736,9 @@ hash_native_abi (void)
   Vcomp_abi_hash =
     comp_hash_string (
       concat3 (build_string (ABI_VERSION),
-	       concat2 (Vemacs_version, Vsystem_configuration),
-	       Fmapconcat (intern_c_string ("subr-name"),
+	       concat3 (Vemacs_version, Vsystem_configuration,
+			Vsystem_configuration_options),
+	       Fmapconcat (intern_c_string ("comp--subr-signature"),
 			   Vcomp_subr_list, build_string (""))));
   Vcomp_native_version_dir =
     concat3 (Vemacs_version, build_string ("-"), Vcomp_abi_hash);
@@ -1129,56 +1155,15 @@ emit_rvalue_from_long_long (gcc_jit_type *type, long long n)
 }
 
 static gcc_jit_rvalue *
-emit_rvalue_from_unsigned_long_long (gcc_jit_type *type, unsigned long long n)
-{
-  emit_comment (format_string ("emit unsigned long long: %llu", n));
-
-  gcc_jit_rvalue *high =
-    gcc_jit_context_new_rvalue_from_long (comp.ctxt,
-					  comp.unsigned_long_long_type,
-					  n >> 32);
-  gcc_jit_rvalue *low =
-    emit_binary_op (GCC_JIT_BINARY_OP_RSHIFT,
-		    comp.unsigned_long_long_type,
-		    emit_binary_op (GCC_JIT_BINARY_OP_LSHIFT,
-				    comp.unsigned_long_long_type,
-				    gcc_jit_context_new_rvalue_from_long (
-				      comp.ctxt,
-				      comp.unsigned_long_long_type,
-				      n),
-				    gcc_jit_context_new_rvalue_from_int (
-				      comp.ctxt,
-				      comp.unsigned_long_long_type,
-				      32)),
-		    gcc_jit_context_new_rvalue_from_int (
-		      comp.ctxt,
-		      comp.unsigned_long_long_type,
-		      32));
-
-  return emit_coerce (
-           type,
-           emit_binary_op (
-             GCC_JIT_BINARY_OP_BITWISE_OR,
-             comp.unsigned_long_long_type,
-             emit_binary_op (
-               GCC_JIT_BINARY_OP_LSHIFT,
-               comp.unsigned_long_long_type,
-               high,
-               gcc_jit_context_new_rvalue_from_int (comp.ctxt,
-                                                    comp.unsigned_long_long_type,
-                                                    32)),
-             low));
-}
-
-static gcc_jit_rvalue *
 emit_rvalue_from_emacs_uint (EMACS_UINT val)
 {
-  if (val > LONG_MAX || val < LONG_MIN)
-    return emit_rvalue_from_unsigned_long_long (comp.emacs_uint_type, val);
-  else
-    return gcc_jit_context_new_rvalue_from_long (comp.ctxt,
-						 comp.emacs_uint_type,
-						 val);
+#ifdef WIDE_EMACS_INT
+  if (val > ULONG_MAX)
+    return emit_rvalue_from_long_long (comp.emacs_uint_type, val);
+#endif
+  return gcc_jit_context_new_rvalue_from_long (comp.ctxt,
+					       comp.emacs_uint_type,
+					       val);
 }
 
 static gcc_jit_rvalue *
@@ -1194,12 +1179,13 @@ emit_rvalue_from_emacs_int (EMACS_INT val)
 static gcc_jit_rvalue *
 emit_rvalue_from_lisp_word_tag (Lisp_Word_tag val)
 {
-  if (val > LONG_MAX || val < LONG_MIN)
-    return emit_rvalue_from_unsigned_long_long (comp.lisp_word_tag_type, val);
-  else
-    return gcc_jit_context_new_rvalue_from_long (comp.ctxt,
-						 comp.lisp_word_tag_type,
-						 val);
+#ifdef WIDE_EMACS_INT
+  if (val > ULONG_MAX)
+    return emit_rvalue_from_long_long (comp.lisp_word_tag_type, val);
+#endif
+  return gcc_jit_context_new_rvalue_from_long (comp.ctxt,
+					       comp.lisp_word_tag_type,
+					       val);
 }
 
 static gcc_jit_rvalue *
@@ -1211,7 +1197,7 @@ emit_rvalue_from_lisp_word (Lisp_Word val)
                                               val);
 #else
   if (val > LONG_MAX || val < LONG_MIN)
-    return emit_rvalue_from_unsigned_long_long (comp.lisp_word_type, val);
+    return emit_rvalue_from_long_long (comp.lisp_word_type, val);
   else
     return gcc_jit_context_new_rvalue_from_long (comp.ctxt,
 						 comp.lisp_word_type,
@@ -1782,11 +1768,11 @@ emit_PURE_P (gcc_jit_rvalue *ptr)
 static gcc_jit_rvalue *
 emit_mvar_rval (Lisp_Object mvar)
 {
-  Lisp_Object const_vld = CALL1I (comp-mvar-value-vld-p, mvar);
+  Lisp_Object const_vld = CALL1I (comp-cstr-imm-vld-p, mvar);
 
   if (!NILP (const_vld))
     {
-      Lisp_Object value = CALL1I (comp-mvar-value, mvar);
+      Lisp_Object value = CALL1I (comp-cstr-imm, mvar);
       if (comp.debug > 1)
 	{
 	  Lisp_Object func =
@@ -1964,8 +1950,19 @@ emit_setjmp (gcc_jit_rvalue *buf)
 {
 #ifndef WINDOWSNT
   gcc_jit_rvalue *args[] = {buf};
-  return emit_call (intern_c_string (STR (SETJMP_NAME)), comp.int_type, 1, args,
-                   false);
+  gcc_jit_param *params[] =
+  {
+    gcc_jit_context_new_param (comp.ctxt, NULL, comp.void_ptr_type, "buf"),
+  };
+  /* Don't call setjmp through a function pointer (Bug#46824) */
+  gcc_jit_function *f =
+    gcc_jit_context_new_function (comp.ctxt, NULL,
+				  GCC_JIT_FUNCTION_IMPORTED,
+				  comp.int_type, STR (SETJMP_NAME),
+				  ARRAYELTS (params), params,
+				  false);
+
+  return gcc_jit_context_new_call (comp.ctxt, NULL, f, 1, args);
 #else
   /* _setjmp (buf, __builtin_frame_address (0)) */
   gcc_jit_rvalue *args[2];
@@ -2697,10 +2694,7 @@ declare_runtime_imported_funcs (void)
   args[1] = comp.int_type;
   ADD_IMPORTED (push_handler, comp.handler_ptr_type, 2, args);
 
-#ifndef WINDOWSNT
-  args[0] = gcc_jit_type_get_pointer (gcc_jit_struct_as_type (comp.jmp_buf_s));
-  ADD_IMPORTED (SETJMP_NAME, comp.int_type, 1, args);
-#else
+#ifdef WINDOWSNT
   args[0] = gcc_jit_type_get_pointer (gcc_jit_struct_as_type (comp.jmp_buf_s));
   args[1] = comp.void_ptr_type;
   ADD_IMPORTED (SETJMP_NAME, comp.int_type, 2, args);
@@ -3800,7 +3794,7 @@ static gcc_jit_function *
 declare_lex_function (Lisp_Object func)
 {
   gcc_jit_function *res;
-  char *c_name = SSDATA (CALL1I (comp-func-c-name, func));
+  Lisp_Object c_name = CALL1I (comp-func-c-name, func);
   Lisp_Object args = CALL1I (comp-func-l-args, func);
   bool nargs = !NILP (CALL1I (comp-nargs-p, args));
   USE_SAFE_ALLOCA;
@@ -3822,7 +3816,7 @@ declare_lex_function (Lisp_Object func)
       res = gcc_jit_context_new_function (comp.ctxt, NULL,
 					  GCC_JIT_FUNCTION_EXPORTED,
 					  comp.lisp_obj_type,
-					  c_name,
+					  SSDATA (c_name),
 					  max_args,
 					  params,
 					  0);
@@ -3843,7 +3837,8 @@ declare_lex_function (Lisp_Object func)
 				      NULL,
 				      GCC_JIT_FUNCTION_EXPORTED,
 				      comp.lisp_obj_type,
-				      c_name, ARRAYELTS (params), params, 0);
+				      SSDATA (c_name),
+				      ARRAYELTS (params), params, 0);
     }
   SAFE_FREE ();
   return res;
@@ -4018,6 +4013,10 @@ If BASE-DIR is nil use the first entry in `comp-eln-load-path'.  */)
   if (NILP (Ffile_exists_p (filename)))
     xsignal1 (Qfile_missing, filename);
 
+#ifdef WINDOWSNT
+  filename = Fw32_long_file_name (filename);
+#endif
+
   Lisp_Object content_hash = comp_hash_source_file (filename);
 
   if (suffix_p (filename, ".gz"))
@@ -4049,8 +4048,11 @@ If BASE-DIR is nil use the first entry in `comp-eln-load-path'.  */)
       Lisp_Object sys_re =
 	concat2 (build_string ("\\`[[:ascii:]]+"),
 		 Fregexp_quote (build_string ("/" PATH_REL_LOADSEARCH "/")));
-      loadsearch_re_list =
-	list2 (sys_re, Fregexp_quote (build_string (PATH_DUMPLOADSEARCH "/")));
+      Lisp_Object dump_load_search = build_string (PATH_DUMPLOADSEARCH "/");
+#ifdef WINDOWSNT
+      dump_load_search = Fw32_long_file_name (dump_load_search);
+#endif
+      loadsearch_re_list = list2 (sys_re, Fregexp_quote (dump_load_search));
     }
 
   Lisp_Object lds_re_tail = loadsearch_re_list;
@@ -4333,6 +4335,10 @@ add_driver_options (void)
   if (!NILP (Fcomp_native_driver_options_effective_p ()))
     FOR_EACH_TAIL (options)
       gcc_jit_context_add_driver_option (comp.ctxt,
+					 /* FIXME: Need to encode
+					    this, but how? either
+					    ENCODE_FILE or
+					    ENCODE_SYSTEM.  */
 					 SSDATA (XCAR (options)));
   return;
 #endif
@@ -4354,6 +4360,7 @@ DEFUN ("comp--compile-ctxt-to-file", Fcomp__compile_ctxt_to_file,
 
   CHECK_STRING (filename);
   Lisp_Object base_name = Fsubstring (filename, Qnil, make_fixnum (-4));
+  Lisp_Object ebase_name = ENCODE_FILE (base_name);
 
   comp.func_relocs_local = NULL;
 
@@ -4368,7 +4375,7 @@ DEFUN ("comp--compile-ctxt-to-file", Fcomp__compile_ctxt_to_file,
 				       1);
   if (comp.debug > 2)
     {
-      logfile = fopen ("libgccjit.log", "w");
+      logfile = emacs_fopen ("libgccjit.log", "w");
       gcc_jit_context_set_logfile (comp.ctxt,
 				   logfile,
 				   0, 0);
@@ -4415,22 +4422,32 @@ DEFUN ("comp--compile-ctxt-to-file", Fcomp__compile_ctxt_to_file,
     if (!EQ (HASH_VALUE (func_h, i), Qunbound))
       compile_function (HASH_VALUE (func_h, i));
 
+  /* Work around bug#46495 (GCC PR99126). */
+#if defined (WIDE_EMACS_INT)						\
+  && (defined (LIBGCCJIT_HAVE_gcc_jit_context_add_command_line_option)	\
+      || defined (WINDOWSNT))
+  Lisp_Object version = Fcomp_libgccjit_version ();
+  if (!NILP (version) && XFIXNUM (XCAR (version)) == 10)
+    gcc_jit_context_add_command_line_option (comp.ctxt,
+					     "-fdisable-tree-isolate-paths");
+#endif
+
   add_driver_options ();
 
   if (comp.debug)
       gcc_jit_context_dump_to_file (comp.ctxt,
-				    format_string ("%s.c", SSDATA (base_name)),
+				    format_string ("%s.c", SSDATA (ebase_name)),
 				    1);
   if (!NILP (Fsymbol_value (Qcomp_libgccjit_reproducer)))
     gcc_jit_context_dump_reproducer_to_file (
       comp.ctxt,
-      format_string ("%s_libgccjit_repro.c", SSDATA (base_name)));
+      format_string ("%s_libgccjit_repro.c", SSDATA (ebase_name)));
 
   Lisp_Object tmp_file =
     Fmake_temp_file_internal (base_name, Qnil, build_string (".eln.tmp"), Qnil);
   gcc_jit_context_compile_to_file (comp.ctxt,
 				   GCC_JIT_OUTPUT_KIND_DYNAMIC_LIBRARY,
-				   SSDATA (tmp_file));
+				   SSDATA (ENCODE_FILE (tmp_file)));
 
   const char *err =  gcc_jit_context_get_first_error (comp.ctxt);
   if (err)
@@ -4518,6 +4535,14 @@ helper_PSEUDOVECTOR_TYPEP_XUNTAG (Lisp_Object a, enum pvec_type code)
 
 static Lisp_Object all_loaded_comp_units_h;
 
+#ifdef WINDOWSNT
+static Lisp_Object
+return_nil (Lisp_Object arg)
+{
+  return Qnil;
+}
+#endif
+
 /* Windows does not let us delete a .eln file that is currently loaded
    by a process.  The strategy is to rename .eln files into .old.eln
    instead of removing them when this is not possible and clean-up
@@ -4529,8 +4554,6 @@ void
 eln_load_path_final_clean_up (void)
 {
 #ifdef WINDOWSNT
-  Lisp_Object return_nil (Lisp_Object arg) { return Qnil; }
-
   Lisp_Object dir_tail = Vcomp_eln_load_path;
   FOR_EACH_TAIL (dir_tail)
     {
@@ -5028,28 +5051,29 @@ LATE_LOAD has to be non-nil when loading for deferred compilation.  */)
     xsignal2 (Qnative_lisp_load_failed, build_string ("file does not exists"),
 	      filename);
   struct Lisp_Native_Comp_Unit *comp_u = allocate_native_comp_unit ();
+  Lisp_Object encoded_filename = ENCODE_FILE (filename);
 
   if (!NILP (Fgethash (filename, all_loaded_comp_units_h, Qnil))
       && !file_in_eln_sys_dir (filename)
       && !NILP (Ffile_writable_p (filename)))
     {
       /* If in this session there was ever a file loaded with this
-	 name rename before loading it to make sure we always get a
+	 name, rename it before loading, to make sure we always get a
 	 new handle!  */
       Lisp_Object tmp_filename =
 	Fmake_temp_file_internal (filename, Qnil, build_string (".eln.tmp"),
 				  Qnil);
       if (NILP (Ffile_writable_p (tmp_filename)))
-	comp_u->handle = dynlib_open (SSDATA (filename));
+	comp_u->handle = dynlib_open (SSDATA (encoded_filename));
       else
 	{
 	  Frename_file (filename, tmp_filename, Qt);
-	  comp_u->handle = dynlib_open (SSDATA (tmp_filename));
+	  comp_u->handle = dynlib_open (SSDATA (ENCODE_FILE (tmp_filename)));
 	  Frename_file (tmp_filename, filename, Qnil);
 	}
     }
   else
-    comp_u->handle = dynlib_open (SSDATA (filename));
+    comp_u->handle = dynlib_open (SSDATA (encoded_filename));
 
   if (!comp_u->handle)
     xsignal2 (Qnative_lisp_load_failed, filename,
@@ -5194,6 +5218,7 @@ compiled one.  */);
         build_pure_c_string ("eln file inconsistent with current runtime "
 			     "configuration, please recompile"));
 
+  defsubr (&Scomp__subr_signature);
   defsubr (&Scomp_el_to_eln_filename);
   defsubr (&Scomp_native_driver_options_effective_p);
   defsubr (&Scomp__install_trampoline);

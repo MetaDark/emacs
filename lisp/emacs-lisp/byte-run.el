@@ -154,14 +154,12 @@ The return value of this function is not used."
 (defalias 'byte-run--set-completion
   #'(lambda (f _args val)
       (list 'function-put (list 'quote f)
-            ''completion-predicate val)))
+            ''completion-predicate (list 'function val))))
 
 (defalias 'byte-run--set-modes
   #'(lambda (f _args &rest val)
       (list 'function-put (list 'quote f)
-            ''completion-predicate
-            `(lambda (_ b)
-               (command-completion-with-modes-p ',val b)))))
+            ''command-modes (list 'quote val))))
 
 ;; Add any new entries to info node `(elisp)Declare Form'.
 (defvar defun-declarations-alist
